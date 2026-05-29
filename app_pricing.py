@@ -4,24 +4,23 @@ import numpy as np
 import statsmodels.api as sm
 import plotly.express as px
 
-# --- CONFIGURACIÓN ---
-st.set_page_config(page_title="Pricing Pro - CreoQueYaQuedo", layout="wide")
+# --- CONFIGURACIÓN TÉCNICA ---
+st.set_page_config(page_title="Pricing Manager - Estilo Notebook", layout="wide")
 
-# --- FUNCIONES CORE DEL NOTEBOOK ---
-def limpiar_datos_estricto(df):
-    # Lógica del Bloque 2 del notebook
-    cols_numericas = ['CANTIDAD', 'PRECIO_UNITARIO', 'VENTA_NETA']
-    for col in cols_numericas:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col].astype(str).str.replace(r'[^0-9.]', '', regex=True), errors='coerce')
+def limpiar_datos_notebook(df):
+    """Lógica del Bloque 2 del notebook"""
+    cols = ['SKU', 'CANTIDAD', 'PRECIO_UNITARIO', 'VENTA_NETA']
+    for c in cols:
+        if c in df.columns:
+            # Eliminamos basura de texto y convertimos a número
+            df[c] = pd.to_numeric(df[c].astype(str).str.replace(r'[^0-9.]', '', regex=True), errors='coerce')
     
-    # Filtro de seguridad para logaritmos (Bloque 4)
+    # Solo filas con datos completos y positivos para el logaritmo
     df = df.dropna(subset=['SKU', 'CANTIDAD', 'PRECIO_UNITARIO'])
-    df = df[(df['CANTIDAD'] > 0) & (df['PRECIO_UNITARIO'] > 0)]
-    return df
+    return df[(df['CANTIDAD'] > 0) & (df['PRECIO_UNITARIO'] > 0)]
 
-def calcular_elasticidad_notebook(df):
-    # Lógica del Bloque 4: Regresión OLS Log-Log
+def ejecutar_modelo_notebook(df):
+    """Lógica del Bloque 4: Elasticidad Log-Log"""
     resultados = []
     for sku in df['SKU'].unique():
         sub = df[df['SKU'] == sku].copy()
@@ -38,74 +37,82 @@ def calcular_elasticidad_notebook(df):
                 'R2': model.rsquared,
                 'P_Value': model.pvalues[1],
                 'Q_Base': sub['CANTIDAD'].sum(),
-                'P_Base': sub['PRECIO_UNITARIO'].mean()
+                'P_Promedio': sub['PRECIO_UNITARIO'].mean()
             })
         except: continue
     return pd.DataFrame(resultados)
 
-# --- INTERFAZ ---
-st.title("🚀 Dashboard de Pricing Dinámico")
-st.markdown("Basado íntegramente en `CreoQueYaQuedo.ipynb`")
+# --- ESTRUCTURA VISUAL ---
+st.title("📊 Pricing Dinámico: Creoqueyaquedo")
+st.markdown("Adaptación completa del notebook original a herramienta interactiva.")
 
-tab1, tab2, tab3 = st.tabs(["📥 Carga de Datos", "📈 Análisis Estadístico", "💰 Simulador"])
+tab1, tab2, tab3 = st.tabs(["📁 Carga de Datos", "📈 Análisis de Demanda", "💰 Simulador de Precios"])
 
 with tab1:
-    st.header("Carga de Ventas")
-    archivo = st.file_uploader("Subir CSV", type=['csv'])
+    st.header("1. Importación y Limpieza")
+    archivo = st.file_uploader("Sube tu archivo CSV", type=['csv'])
     
     if archivo:
         df_raw = pd.read_csv(archivo)
-        df_clean = limpiar_datos_estricto(df_raw)
+        df_clean = limpiar_datos_notebook(df_raw)
         
-        # GUARDAR EN SESSION STATE (Esto evita el NameError)
+        # PROCESAMIENTO INMEDIATO: Calculamos todo de una vez para evitar NameErrors
+        df_elast = ejecutar_modelo_notebook(df_clean)
+        
+        # Guardamos en la memoria de la sesión
         st.session_state['df_master'] = df_clean
+        st.session_state['df_elast'] = df_elast
         
-        st.success(f"✅ Datos cargados: {len(df_clean)} registros.")
+        st.success(f"✅ ¡Todo listo! Se procesaron {len(df_clean)} registros y {len(df_elast)} SKUs.")
         st.dataframe(df_clean.head())
 
 with tab2:
-    st.header("Análisis de Elasticidad")
-    # Verificamos si los datos existen en la "memoria"
-    if 'df_master' in st.session_state:
+    st.header("2. Curvas de Elasticidad")
+    # Verificamos que los datos existan antes de mostrar nada
+    if 'df_master' in st.session_state and 'df_elast' in st.session_state:
         df = st.session_state['df_master']
-        df_elast = calcular_elasticidad_notebook(df)
-        st.session_state['df_elast'] = df_elast # Guardamos resultados
+        res_elast = st.session_state['df_elast']
         
-        sku_sel = st.selectbox("Seleccionar SKU para visualizar curva:", df_elast['SKU'].unique())
+        sku_sel = st.selectbox("Selecciona un producto para analizar:", res_elast['SKU'].unique())
+        
+        # Gráfica interactiva
         sub_plot = df[df['SKU'] == sku_sel]
-        
         fig = px.scatter(sub_plot, x='PRECIO_UNITARIO', y='CANTIDAD', trendline="ols",
-                         title=f"Regresión Log-Log: {sku_sel}")
+                         title=f"Modelo de Demanda para {sku_sel}",
+                         labels={'PRECIO_UNITARIO': 'Precio ($)', 'CANTIDAD': 'Unidades'})
         st.plotly_chart(fig, use_container_width=True)
-        st.dataframe(df_elast.style.format(precision=3))
+        
+        st.subheader("Métricas Estadísticas")
+        st.dataframe(res_elast.style.format(precision=3))
     else:
-        st.warning("⚠️ Primero carga un archivo en la pestaña 'Carga de Datos'.")
+        st.info("👆 Por favor, carga un archivo en la primera pestaña para ver el análisis.")
 
 with tab3:
-    st.header("Simulador de Impacto (Bloque 6)")
+    st.header("3. Simulador de Escenarios Financieros")
     if 'df_elast' in st.session_state:
-        df_res = st.session_state['df_elast'].copy()
+        res_sim = st.session_state['df_elast'].copy()
         
-        col1, col2 = st.columns(2)
-        with col1:
+        c1, c2 = st.columns(2)
+        with c1:
             ajuste = st.select_slider("Ajuste de Precio (%)", options=[-0.15, -0.10, -0.05, 0, 0.05, 0.10, 0.15])
-        with col2:
-            promo = st.selectbox("Efecto Promocional", ["Ninguna", "2x1", "3x2", "2do al 50%"])
+        with c2:
+            mecanica = st.selectbox("Mecánica Promocional Sugerida:", ["Ninguna", "2x1", "3x2", "2do al 50%"])
         
-        # Lógica de proyección del notebook
-        df_res['Nuevo_Precio'] = df_res['P_Base'] * (1 + ajuste)
-        df_res['Nueva_Demanda'] = df_res['Q_Base'] * (1 + (df_res['Elasticidad'] * ajuste))
+        # Lógica de impacto del Bloque 6 del notebook
+        res_sim['Nuevo_Precio'] = res_sim['P_Promedio'] * (1 + ajuste)
+        res_sim['Nueva_Demanda'] = res_sim['Q_Base'] * (1 + (res_sim['Elasticidad'] * ajuste))
         
-        # Multiplicadores promocionales (Bloque 6)
-        if promo == "2x1": df_res['Nueva_Demanda'] *= 1.85
-        elif promo == "3x2": df_res['Nueva_Demanda'] *= 1.50
+        # Multiplicadores de volumen por promoción
+        if mecanica == "2x1": res_sim['Nueva_Demanda'] *= 1.85
+        elif mecanica == "3x2": res_sim['Nueva_Demanda'] *= 1.55
         
-        st.subheader("Resultados de Simulación")
-        st.dataframe(df_res[['SKU', 'Elasticidad', 'P_Base', 'Nuevo_Precio', 'Nueva_Demanda']])
+        st.subheader("Proyección de Resultados")
+        st.dataframe(res_sim[['SKU', 'Elasticidad', 'P_Promedio', 'Nuevo_Precio', 'Nueva_Demanda']])
         
-        # Dictamen Estratégico
-        for _, row in df_res.head(3).iterrows():
-            rec = "BAJAR PRECIO" if row['Elasticidad'] < -1.2 else "SUBIR PRECIO"
-            st.info(f"**Estrategia para {row['SKU']}:** Elasticidad {row['Elasticidad']:.2f} -> **{rec}**")
+        # Dictámenes del notebook
+        st.markdown("### 💡 Insights Estratégicos")
+        for i, r in res_sim.head(3).iterrows():
+            rec = "🔴 INELÁSTICO: Foco en MARGEN (Subir Precio)" if r['Elasticidad'] > -1 else "🟢 ELÁSTICO: Foco en VOLUMEN (Bajar Precio)"
+            st.warning(f"**SKU {r['SKU']}:** {rec}")
     else:
-        st.error("❌ No hay cálculos de elasticidad disponibles. Revisa la pestaña anterior.")
+        st.info("👆 Carga tus datos para activar el simulador.")
