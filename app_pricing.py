@@ -5,38 +5,28 @@ import statsmodels.api as sm
 import plotly.express as px
 
 # --- CONFIGURACIÓN ---
-st.set_page_config(page_title="Pricing Granular - OfficeMax", layout="wide")
+st.set_page_config(page_title="Pricing Granular OfficeMax", layout="wide")
 
-# Estilos personalizados
-st.markdown("""
-    <style>
-    .stMetric { background-color: #ffffff; padding: 15px; border-radius: 10px; border: 1px solid #eef0f2; }
-    .sidebar .sidebar-content { background-image: linear-gradient(#f8f9fa,#e9ecef); }
-    </style>
-    """, unsafe_allow_html=True)
+# --- FUNCIONES CORE ---
 
-# --- FUNCIONES CORE DEL NOTEBOOK (ADAPTADAS) ---
-
-def limpiar_datos_granular(df):
-    """Limpieza basada en Bloque 2 del notebook"""
-    # Columnas críticas de tu CSV
-    cols_num = ['qty', 'net_sale', 'utilidad', 'margen']
+def limpiar_datos_officemax(df):
+    """Limpieza estricta basada en el Bloque 2 del notebook"""
+    cols_num = ['qty', 'net_sale', 'margen', 'utilidad']
     for col in cols_num:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col].astype(str).str.replace(r'[^0-9.]', '', regex=True), errors='coerce')
     
-    # Filtro para evitar errores en logaritmos (Bloque 4)
+    # Filtro para evitar errores en logaritmos
     df = df.dropna(subset=['prod_nbr', 'qty', 'net_sale'])
     return df[(df['qty'] > 0) & (df['net_sale'] > 0)]
 
-def calcular_elasticidad_subset(df_subset):
-    """Calcula elasticidad para los SKUs presentes en el filtro actual"""
+def calcular_elasticidad_granular(df_filtered):
+    """Cálculo de elasticidad OLS (Bloque 4 del notebook)"""
     resultados = []
-    skus = df_subset['prod_nbr'].unique()
-    
-    for sku in skus:
-        sub = df_subset[df_subset['prod_nbr'] == sku]
-        if len(sub) < 5: continue
+    # Calculamos para los productos que sobrevivieron a los filtros
+    for sku in df_filtered['prod_nbr'].unique():
+        sub = df_filtered[df_filtered['prod_nbr'] == sku]
+        if len(sub) < 5: continue # Mínimo estadístico
         
         try:
             y = np.log(sub['qty'].values.astype(float))
@@ -48,116 +38,110 @@ def calcular_elasticidad_subset(df_subset):
                 'prod_nbr': sku,
                 'Elasticidad': model.params[1],
                 'R2': model.rsquared,
-                'Venta_Total': sub['qty'].sum(),
-                'Precio_Prom_Historico': sub['net_sale'].mean(),
-                'Margen_Prom_Historico': sub['margen'].mean() if 'margen' in sub.columns else 0
+                'Venta_Acumulada': sub['qty'].sum(),
+                'Precio_Prom_Real': sub['net_sale'].mean(),
+                'Margen_Prom': sub['margen'].mean() if 'margen' in sub.columns else 0
             })
         except: continue
     return pd.DataFrame(resultados)
 
 # --- INTERFAZ DINÁMICA ---
 
-st.title("🎯 Dashboard de Pricing OfficeMax")
-st.caption("Filtros Granulares | Basado en CreoQueYaQuedo.ipynb")
-
-# 1. CARGA DE DATOS
-f = st.sidebar.file_uploader("1. Cargar Venta_OfficeMax_Ticket.csv", type=['csv'])
+st.sidebar.title("📊 Filtros OfficeMax")
+f = st.sidebar.file_uploader("Cargar Venta_OfficeMax_Ticket.csv", type=['csv'])
 
 if f:
-    # Leer y limpiar
+    # 1. Carga Inicial
     df_raw = pd.read_csv(f)
-    df_main = limpiar_datos_granular(df_raw)
+    df_main = limpiar_datos_officemax(df_raw)
     
-    # 2. SIDEBAR - FILTROS GRANULARES
-    st.sidebar.header("Filtros de Análisis")
+    # 2. Lógica de Filtros Granulares (con Keys únicas para evitar DuplicateWidgetID)
+    st.sidebar.markdown("---")
     
     # Filtro Departamento
-    depto_list = sorted(df_main['dept_nm'].unique().tolist())
-    depto_sel = st.sidebar.multiselect("Departamento", depto_list)
+    deptos = sorted(df_main['dept_nm'].unique())
+    sel_depto = st.sidebar.multiselect("Departamento", deptos, key="m_depto")
     
-    df_filtered = df_main.copy()
-    if depto_sel:
-        df_filtered = df_filtered[df_filtered['dept_nm'].isin(depto_sel)]
-    
-    # Filtro Categoría (Depende del Depto)
-    class_list = sorted(df_filtered['class_nm'].unique().tolist())
-    class_sel = st.sidebar.multiselect("Categoría (Clase)", class_list)
-    
-    if class_sel:
-        df_filtered = df_filtered[df_filtered['class_nm'].isin(class_sel)]
+    temp_df = df_main.copy()
+    if sel_depto:
+        temp_df = temp_df[temp_df['dept_nm'].isin(sel_depto)]
         
-    # Filtro Marca (Opcional)
-    marca_list = sorted(df_filtered['marca'].unique().tolist())
-    marca_sel = st.sidebar.multiselect("Marca", marca_list)
-    if marca_sel:
-        df_filtered = df_filtered[df_filtered['marca'].isin(marca_sel)]
+    # Filtro Clase (dependiente del Depto)
+    clases = sorted(temp_df['class_nm'].unique())
+    sel_clase = st.sidebar.multiselect("Categoría / Clase", clases, key="m_clase")
+    if sel_clase:
+        temp_df = temp_df[temp_df['class_nm'].isin(sel_clase)]
+        
+    # Filtro Marca (dependiente de Clase)
+    marcas = sorted(temp_df['marca'].unique())
+    sel_marca = st.sidebar.multiselect("Marca", marcas, key="m_marca")
+    if sel_marca:
+        temp_df = temp_df[temp_df['marca'].isin(sel_marca)]
 
-    # --- PESTAÑAS ---
-    tab1, tab2, tab3 = st.tabs(["📊 Vista General", "📈 Elasticidad Detallada", "💰 Simulador de Impacto"])
+    # 3. Tabs Principales
+    tab1, tab2, tab3 = st.tabs(["📋 Resumen", "📈 Análisis de Demanda", "💰 Simulador"])
 
     with tab1:
-        st.subheader("Resumen del Segmento Seleccionado")
+        st.subheader("Métricas del Segmento Seleccionado")
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("SKUs en Filtro", df_filtered['prod_nbr'].nunique())
-        c2.metric("Venta Qty", int(df_filtered['qty'].sum()))
-        c3.metric("Ticket Promedio", f"${df_filtered['net_sale'].mean():.2f}")
-        c4.metric("Margen Prom.", f"{df_filtered['margen'].mean()*100:.1f}%")
+        c1.metric("SKUs Filtrados", temp_df['prod_nbr'].nunique())
+        c2.metric("Volumen Total", f"{int(temp_df['qty'].sum()):,}")
+        c3.metric("Precio Prom.", f"${temp_df['net_sale'].mean():.2f}")
+        c4.metric("Margen Prom.", f"{temp_df['margen'].mean()*100:.1f}%")
         
-        st.dataframe(df_filtered.head(50), use_container_width=True)
+        st.dataframe(temp_df.head(100), use_container_width=True)
 
     with tab2:
-        st.subheader("Análisis de Demanda por Producto")
-        
-        # Calculamos elasticidad solo para lo filtrado
-        df_elast = calcular_elasticidad_subset(df_filtered)
+        st.subheader("Cálculo de Elasticidad por Producto")
+        df_elast = calcular_elasticidad_granular(temp_df)
         
         if not df_elast.empty:
-            col_chart, col_table = st.columns([2, 1])
+            col_graph, col_data = st.columns([2, 1])
             
-            with col_table:
-                st.write("Top SKUs por Elasticidad")
+            with col_data:
+                st.write("Top Productos")
                 st.dataframe(df_elast[['prod_nbr', 'Elasticidad', 'R2']].sort_values('Elasticidad'), hide_index=True)
             
-            with col_chart:
-                sku_viz = st.selectbox("Analizar Curva de SKU:", df_elast['prod_nbr'].unique())
-                fig = px.scatter(df_filtered[df_filtered['prod_nbr'] == sku_viz], 
+            with col_graph:
+                sku_viz = st.selectbox("Seleccionar SKU para visualizar:", df_elast['prod_nbr'].unique(), key="s_viz")
+                fig = px.scatter(temp_df[temp_df['prod_nbr'] == sku_viz], 
                                  x='net_sale', y='qty', trendline="ols",
-                                 title=f"Elasticidad Log-Log: SKU {sku_viz}",
-                                 labels={'net_sale': 'Precio Unitario', 'qty': 'Cantidad'})
+                                 title=f"Elasticidad: SKU {sku_viz}",
+                                 labels={'net_sale': 'Precio ($)', 'qty': 'Cantidad (U)'})
                 st.plotly_chart(fig, use_container_width=True)
         else:
-            st.warning("No hay suficientes datos en este filtro para calcular elasticidades (se requieren 5+ registros por SKU).")
+            st.warning("⚠️ Selecciona un filtro con más datos. Se requieren al menos 5 puntos de venta por SKU para calcular la elasticidad.")
 
     with tab3:
         if 'df_elast' in locals() and not df_elast.empty:
-            st.subheader("Simulador de Escenarios Financieros")
+            st.subheader("Simulador de Impacto (Notebook Bloque 6)")
             
-            # Controles de simulación
-            col_s1, col_s2 = st.columns(2)
-            with col_s1:
-                pct_ajuste = st.select_slider("Ajuste de Precio (%)", options=[-0.15, -0.10, -0.05, 0, 0.05, 0.10, 0.15])
-            with col_s2:
-                promo = st.selectbox("Escenario Promocional (Notebook Bloque 6):", ["Ninguno", "2x1", "3x2", "2do al 50%"])
+            # Ajustes globales para el segmento
+            ajuste_p = st.select_slider("Ajuste de Precio (%)", options=[-0.15, -0.10, -0.05, 0, 0.05, 0.10, 0.15], value=0.0)
+            promo = st.selectbox("Mecánica Promocional:", ["Ninguna", "2x1", "3x2", "2do al 50%"], key="s_promo")
             
-            # Proyecciones
             df_sim = df_elast.copy()
-            df_sim['Nuevo_Precio'] = df_sim['Precio_Prom_Historico'] * (1 + pct_ajuste)
-            df_sim['Nueva_Demanda'] = df_sim['Venta_Total'] * (1 + (df_sim['Elasticidad'] * pct_ajuste))
+            df_sim['Nuevo_Precio'] = df_sim['Precio_Prom_Real'] * (1 + ajuste_p)
+            df_sim['Nueva_Demanda'] = df_sim['Venta_Acumulada'] * (1 + (df_sim['Elasticidad'] * ajuste_p))
             
-            # Aplicar multiplicadores del notebook
+            # Multiplicadores del notebook
             if promo == "2x1": df_sim['Nueva_Demanda'] *= 1.85
             elif promo == "3x2": df_sim['Nueva_Demanda'] *= 1.55
+            elif promo == "2do al 50%": df_sim['Nueva_Demanda'] *= 1.30
             
-            df_sim['Delta_Ingreso'] = (df_sim['Nuevo_Precio'] * df_sim['Nueva_Demanda']) - (df_sim['Precio_Prom_Historico'] * df_sim['Venta_Total'])
+            df_sim['Delta_Venta_$'] = (df_sim['Nuevo_Precio'] * df_sim['Nueva_Demanda']) - (df_sim['Precio_Prom_Real'] * df_sim['Venta_Acumulada'])
             
-            st.dataframe(df_sim[['prod_nbr', 'Elasticidad', 'Precio_Prom_Historico', 'Nuevo_Precio', 'Nueva_Demanda', 'Delta_Ingreso']].style.format(precision=2))
+            st.dataframe(df_sim[['prod_nbr', 'Elasticidad', 'Precio_Prom_Real', 'Nuevo_Precio', 'Nueva_Demanda', 'Delta_Venta_$']].style.format(precision=2))
             
-            # Dictamen automático
-            top_sku = df_sim.iloc[0]
-            st.info(f"**Dictamen para el SKU más relevante:** El producto {top_sku['prod_nbr']} tiene una elasticidad de {top_sku['Elasticidad']:.2f}. "
-                    f"Un ajuste del {pct_ajuste*100}% resultaría en un cambio de ingreso proyectado de ${top_sku['Delta_Ingreso']:.2f}.")
+            # Dictamen
+            st.markdown("### 💡 Insight Estratégico")
+            avg_e = df_sim['Elasticidad'].mean()
+            if avg_e < -1.1:
+                st.success(f"El segmento seleccionado es **Elástico** ({avg_e:.2f}). Se recomienda bajar precios o aplicar la promoción '{promo}'.")
+            else:
+                st.info(f"El segmento es **Inelástico** ({avg_e:.2f}). Hay oportunidad de subir precio sin perder tanto volumen.")
         else:
-            st.error("Carga datos y aplica filtros para activar el simulador.")
+            st.info("Carga datos para activar el simulador financiero.")
 
 else:
-    st.info("👋 Bienvenida. Por favor, sube el archivo 'Venta_OfficeMax_Ticket.csv' en el panel de la izquierda para comenzar el análisis granular.")
+    st.info("👋 Bienvenida. Por favor sube el archivo 'Venta_OfficeMax_Ticket.csv' en el panel lateral.")
