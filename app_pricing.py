@@ -6,95 +6,91 @@ import plotly.express as px
 
 st.set_page_config(page_title="Dynamic Pricing Dashboard", layout="wide")
 
-# --- LIMPIEZA DE DATOS PROFUNDA ---
-def limpiar_columna_numerica(df, col):
-    if col in df.columns:
-        # 1. Convertir a string y limpiar caracteres raros
-        df[col] = df[col].astype(str).str.replace(r'[^0-9.]', '', regex=True)
-        # 2. Convertir a numérico, lo que no sea número se vuelve NaN
-        df[col] = pd.to_numeric(df[col], errors='coerce')
-    return df
+# --- LIMPIEZA DE DATOS ---
+def sanitizar_dataframe(df):
+    for col in ['CANTIDAD', 'PRECIO_UNITARIO', 'VENTA_NETA']:
+        if col in df.columns:
+            # Quitamos todo lo que no sea número o punto decimal
+            df[col] = df[col].astype(str).str.replace(r'[^0-9.]', '', regex=True)
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+    return df.dropna(subset=['SKU', 'CANTIDAD', 'PRECIO_UNITARIO'])
 
-def calcular_elasticidad_blindada(df):
+def calcular_elasticidad_final(df):
     resultados = []
-    # Solo procesamos si tenemos lo mínimo
-    if not all(col in df.columns for col in ['SKU', 'CANTIDAD', 'PRECIO_UNITARIO']):
-        return pd.DataFrame()
-
     for sku in df['SKU'].unique():
-        # Filtrar solo el SKU actual y asegurar que NO haya ceros ni vacíos
-        sub = df[(df['SKU'] == sku)].copy()
-        sub = sub[(sub['CANTIDAD'] > 0) & (sub['PRECIO_UNITARIO'] > 0)].dropna()
+        sub = df[df['SKU'] == sku].copy()
+        # Solo positivos para evitar errores de logaritmo
+        sub = sub[(sub['CANTIDAD'] > 0) & (sub['PRECIO_UNITARIO'] > 0)]
         
-        if len(sub) < 5:
-            continue
+        if len(sub) < 5: continue
         
         try:
-            # Forzamos conversión a float64 nativo de numpy para evitar el error de la ufunc
-            y = np.log(sub['CANTIDAD'].values.astype(float))
-            x = np.log(sub['PRECIO_UNITARIO'].values.astype(float))
+            # PASO CLAVE: Convertimos a arrays de numpy tipo float puro
+            y = np.log(sub['CANTIDAD'].values.astype(np.float64))
+            x = np.log(sub['PRECIO_UNITARIO'].values.astype(np.float64))
             
+            # Aseguramos que x sea una matriz columna para statsmodels
             X = sm.add_constant(x)
             model = sm.OLS(y, X).fit()
             
             resultados.append({
-                'SKU': sku, 
-                'Elasticidad': model.params[1], 
-                'R2': model.rsquared,
-                'P_Value': model.pvalues[1]
+                'SKU': sku,
+                'Elasticidad': float(model.params[1]), # Forzamos a float de Python
+                'R2': float(model.rsquared),
+                'P_Value': float(model.pvalues[1])
             })
         except:
             continue
     return pd.DataFrame(resultados)
 
-# --- INTERFAZ ---
+# --- APP ---
 tab1, tab2, tab3 = st.tabs(["📁 Datos", "📈 Elasticidad", "💰 Pricing"])
 
 with tab1:
     st.header("Carga de Ventas")
-    f = st.file_uploader("Subir CSV", type=['csv'])
-    if f:
-        df_raw = pd.read_csv(f)
+    archivo = st.file_uploader("Subir base de ventas (CSV)", type=['csv'])
+    if archivo:
+        df_raw = pd.read_csv(archivo)
+        df = sanitizar_dataframe(df_raw)
+        st.session_state['data'] = df
+        st.success(f"Base cargada: {len(df)} registros válidos.")
         
-        # PROCESO DE LIMPIEZA
-        df = limpiar_columna_numerica(df_raw, 'CANTIDAD')
-        df = limpiar_columna_numerica(df, 'PRECIO_UNITARIO')
-        df = limpiar_columna_numerica(df, 'VENTA_NETA')
-        
-        # Eliminar cualquier fila que se haya quedado con NaN en columnas críticas
-        df = df.dropna(subset=['SKU', 'CANTIDAD', 'PRECIO_UNITARIO'])
-        
-        st.session_state['df_final'] = df
-        st.success(f"✅ Base lista: {len(df)} registros procesados correctamente.")
-        st.write("Muestra de datos limpios:", df[['SKU', 'CANTIDAD', 'PRECIO_UNITARIO']].head())
+        # Semáforo de Calidad
+        pct_eliminados = ((len(df_raw) - len(df)) / len(df_raw)) * 100
+        if pct_eliminados > 50:
+            st.error(f"🔴 Calidad Baja: Se eliminó el {pct_eliminados:.1f}% de los datos.")
+        elif pct_eliminados > 25:
+            st.warning(f"🟡 Calidad Media: Se eliminó el {pct_eliminados:.1f}% de los datos.")
+        else:
+            st.success(f"🟢 Calidad Alta: Solo se eliminó el {pct_eliminados:.1f}%.")
 
 with tab2:
-    if 'df_final' in st.session_state:
-        df = st.session_state['df_final']
-        skus_sel = st.multiselect("Seleccionar SKUs", df['SKU'].unique())
-        df_plot = df[df['SKU'].isin(skus_sel)] if skus_sel else df
+    if 'data' in st.session_state:
+        df = st.session_state['data']
+        skus = st.multiselect("Seleccionar SKUs", df['SKU'].unique())
         
-        st.subheader("Análisis de Elasticidad")
-        
-        # Intentamos graficar; si los datos de tendencia fallan, graficamos solo puntos
+        # Gráfica robusta
+        df_plot = df[df['SKU'].isin(skus)] if skus else df
         try:
             fig = px.scatter(df_plot, x='PRECIO_UNITARIO', y='CANTIDAD', color='SKU', trendline="ols")
         except:
             fig = px.scatter(df_plot, x='PRECIO_UNITARIO', y='CANTIDAD', color='SKU')
-            st.info("Nota: Los datos no permiten trazar línea de tendencia para esta selección.")
-            
         st.plotly_chart(fig, use_container_width=True)
         
-        # Tabla de resultados
-        df_res = calcular_elasticidad_blindada(df)
-        if not df_res.empty:
-            st.dataframe(df_res.style.format({'Elasticidad': '{:.2f}', 'R2': '{:.2f}', 'P_Value': '{:.4f}'}))
-        else:
-            st.warning("No hay suficientes datos válidos para calcular la elasticidad.")
+        # Tabla de Elasticidad
+        df_elast = calcular_elasticidad_final(df)
+        st.subheader("Resultados de Elasticidad por SKU")
+        st.dataframe(df_elast.style.format(precision=4))
+        st.session_state['elasticidad'] = df_elast
 
 with tab3:
-    if 'df_final' in st.session_state:
+    if 'data' in st.session_state and 'elasticidad' in st.session_state:
         st.header("Simulador de Pricing")
-        st.info("Mueve el selector para proyectar cambios basados en la elasticidad.")
-        ajuste = st.select_slider("Cambio Precio (%)", options=[-0.15, -0.10, -0.05, 0, 0.05, 0.10, 0.15])
-        st.download_button("Descargar Reporte Final", df.to_csv(index=False), "pricing_final.csv")
+        ajuste = st.select_slider("Cambiar Precio (%)", options=[-0.15, -0.10, -0.05, 0, 0.05, 0.10, 0.15])
+        
+        df_res = st.session_state['elasticidad'].copy()
+        # Lógica de impacto simple
+        df_res['Impacto_Venta'] = df_res['Elasticidad'] * ajuste
+        st.dataframe(df_res)
+        
+        st.download_button("Descargar Resultados Completos", df_res.to_csv(index=False), "pricing_final.csv")
